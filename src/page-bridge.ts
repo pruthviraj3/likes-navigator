@@ -42,7 +42,14 @@
   });
 
   window.fetch = async function patchedFetch(input, init) {
-    const requestUrl = typeof input === "string" ? input : input?.url || "";
+    const requestUrl =
+      typeof input === "string"
+        ? input
+        : input instanceof Request
+          ? input.url
+          : input instanceof URL
+            ? input.toString()
+            : "";
     const requestBody = extractRequestBody(init?.body);
     const response = await originalFetch(input, init);
 

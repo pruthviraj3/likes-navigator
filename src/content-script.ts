@@ -1,3 +1,4 @@
+(() => {
 const LIKES_PATH_PREFIX = "/your_activity/interactions/likes";
 const POST_PATH_REGEX = /^\/p\/[^/]+\/?$/;
 const PAGE_MESSAGE_TYPE = "INSTAGRAM_LIKED_PAYLOAD_CAPTURED";
@@ -20,21 +21,24 @@ const pendingPageCommands = new Map();
 const overlayState = {
   selectedYear: new Date().getFullYear(),
   selectedMonth: new Date().getMonth() + 1,
-  navigationMode: "sequential",
   monthPickerOpen: false,
+  fetchMenuOpen: false,
   collapsed: false,
   extractorReady: false,
-  extractorStatusText: "Loading",
   latestSummaryText: "None",
   hasRefreshTemplate: false,
   hasNextTemplate: false,
-  activeChunkKey: null,
-  activeChunkLabel: null,
+  monthCountsByYear: {},
+  fetchInProgress: false,
+  activeRequestKey: null,
+  activeWeekIndex: null,
+  fetchStatusText: "",
   monthScrollTopByKey: {},
   pendingScrollRestore: false,
   progress: null,
   activeMonthResults: [],
-  activeResultDetail: null
+  activeResultDetail: null,
+  pendingNavigationUrl: null
 };
 let reconcileScheduled = false;
 let hydrateVisibleCardsScheduled = false;
@@ -132,7 +136,7 @@ function installRuntimeMessageHandler() {
   });
 }
 
-function runPageCommand(action, payload = {}, options = {}) {
+function runPageCommand(action, payload = {}, options: any = {}) {
   const requestId = `${Date.now()}:${++pageCommandCounter}`;
 
   return new Promise((resolve, reject) => {
@@ -227,19 +231,23 @@ function installOverlay() {
 
 function installOverlayDismissHandlers() {
   document.addEventListener("pointerdown", (event) => {
-    if (!overlayState.monthPickerOpen) {
+    if (!overlayState.monthPickerOpen && !overlayState.fetchMenuOpen) {
       return;
     }
 
     const target = event.target;
     if (
       target instanceof Element &&
-      target.closest(".insta-liked-overlay-month-picker-shell")
+      (
+        target.closest(".insta-liked-overlay-month-picker-shell") ||
+        target.closest(".insta-liked-overlay-fetch-shell")
+      )
     ) {
       return;
     }
 
     overlayState.monthPickerOpen = false;
+    overlayState.fetchMenuOpen = false;
     renderOverlay();
   });
 }
@@ -252,20 +260,20 @@ async function hydrateOverlay() {
     overlayState.latestSummaryText = formatLatestSummaryText(appState.state.latestMonthResult);
   }
 
+  await refreshYearMonthCounts();
   await refreshOverlaySummaries();
   persistOverlayState();
   renderOverlay();
 }
 
 async function refreshExtractorStatus() {
-  const status = await runPageCommand("GET_STATUS").catch((error) => ({
+  const status: any = await runPageCommand("GET_STATUS").catch((error) => ({
     ready: false,
     reason: String(error)
   }));
   overlayState.extractorReady = Boolean(status?.ready);
   overlayState.hasRefreshTemplate = Boolean(status?.hasRefreshTemplate);
   overlayState.hasNextTemplate = Boolean(status?.hasNextTemplate);
-  overlayState.extractorStatusText = getExtractorStatusLabel(status);
   persistOverlayState();
   renderOverlay();
 }
@@ -280,6 +288,17 @@ async function refreshOverlaySummaries() {
     response?.ok && Array.isArray(response.results) ? response.results : [];
   overlayState.pendingScrollRestore = true;
   syncActiveMonthDetail();
+}
+
+async function refreshYearMonthCounts() {
+  const response = await chrome.runtime.sendMessage({
+    type: "GET_YEAR_MONTH_COUNTS",
+    year: overlayState.selectedYear
+  }).catch(() => null);
+
+  overlayState.monthCountsByYear = response?.ok && response.countsByMonth && typeof response.countsByMonth === "object"
+    ? response.countsByMonth
+    : {};
 }
 
 function renderOverlay() {
@@ -311,18 +330,14 @@ function buildOverlayHeader() {
   const wrapper = document.createElement("div");
   wrapper.className = "insta-liked-overlay-header";
 
-  const statusBadge = document.createElement("div");
-  statusBadge.className = `insta-liked-overlay-status-badge ${getExtractorStatusToneClass()}`;
-  statusBadge.textContent = getDisplayStatusText();
-
   const controls = document.createElement("div");
   controls.className = "insta-liked-overlay-top-controls";
 
+  controls.appendChild(buildHeaderFetchButton());
   controls.appendChild(buildHeaderMonthPickerTrigger());
-  controls.appendChild(createModeButton("sequential", "Sequential arrow navigation", buildIconSvg("list")));
-  controls.appendChild(createModeButton("random", "Random arrow navigation", buildIconSvg("shuffle")));
 
   const closeButton = createIconButton("Close", buildIconSvg("close"));
+  closeButton.classList.add("insta-liked-overlay-header-close");
   closeButton.addEventListener("click", () => {
     overlayState.collapsed = true;
     persistOverlayState();
@@ -331,15 +346,65 @@ function buildOverlayHeader() {
 
   controls.appendChild(closeButton);
 
-  wrapper.appendChild(statusBadge);
   wrapper.appendChild(controls);
   return wrapper;
+}
+
+function buildHeaderFetchButton() {
+  const shell = document.createElement("div");
+  shell.className = "insta-liked-overlay-fetch-shell";
+
+  const fetchButton = document.createElement("button");
+  fetchButton.type = "button";
+  fetchButton.className = `insta-liked-overlay-button insta-liked-overlay-header-fetch ${getFetchButtonToneClass()}`;
+  fetchButton.disabled = !canFetchMonth() || Boolean(overlayState.fetchInProgress);
+  fetchButton.title = getFetchButtonTitle();
+  fetchButton.textContent = overlayState.fetchInProgress ? "Fetching" : "Fetch";
+  fetchButton.addEventListener("click", () => {
+    void fetchMonth();
+  });
+
+  const menuButton = document.createElement("button");
+  menuButton.type = "button";
+  menuButton.className = `insta-liked-overlay-button insta-liked-overlay-fetch-menu-toggle ${getFetchButtonToneClass()}`;
+  menuButton.disabled = !canFetchMonth() || Boolean(overlayState.fetchInProgress);
+  menuButton.title = "More fetch actions";
+  menuButton.setAttribute("aria-label", "More fetch actions");
+  menuButton.appendChild(buildIconNode(buildIconSvg("chevronDown")));
+  menuButton.addEventListener("click", () => {
+    overlayState.fetchMenuOpen = !overlayState.fetchMenuOpen;
+    renderOverlay();
+  });
+
+  shell.appendChild(fetchButton);
+  shell.appendChild(menuButton);
+
+  if (overlayState.fetchMenuOpen && !overlayState.fetchInProgress) {
+    const menu = document.createElement("div");
+    menu.className = "insta-liked-overlay-fetch-menu";
+
+    const fetchYearButton = document.createElement("button");
+    fetchYearButton.type = "button";
+    fetchYearButton.className = "insta-liked-overlay-fetch-menu-item";
+    fetchYearButton.textContent = "Fetch year";
+    fetchYearButton.addEventListener("click", () => {
+      overlayState.fetchMenuOpen = false;
+      renderOverlay();
+      void fetchYear();
+    });
+
+    menu.appendChild(fetchYearButton);
+    shell.appendChild(menu);
+  }
+
+  return shell;
 }
 
 async function shiftOverlayYear(offset) {
   overlayState.selectedYear += offset;
   overlayState.activeMonthResults = [];
   overlayState.activeResultDetail = null;
+  await refreshYearMonthCounts();
   await refreshOverlaySummaries();
   persistOverlayState();
   renderOverlay();
@@ -354,26 +419,10 @@ async function setSelectedMonth(year, month) {
   overlayState.selectedMonth = month;
   overlayState.activeMonthResults = [];
   overlayState.activeResultDetail = null;
+  await refreshYearMonthCounts();
   await refreshOverlaySummaries();
   persistOverlayState();
   renderOverlay();
-}
-
-function createModeButton(mode, title, iconSvg) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = `insta-liked-overlay-mode-button${
-    overlayState.navigationMode === mode ? " is-active" : ""
-  }`;
-  button.title = title;
-  button.setAttribute("aria-label", title);
-  button.appendChild(buildIconNode(iconSvg));
-  button.addEventListener("click", () => {
-    overlayState.navigationMode = mode;
-    persistOverlayState();
-    renderOverlay();
-  });
-  return button;
 }
 
 function buildHeaderMonthPickerTrigger() {
@@ -442,15 +491,25 @@ function buildOverlayMonthPicker() {
   monthGrid.className = "insta-liked-overlay-month-grid";
 
   getMonthNames().forEach((monthName, index) => {
+    const monthNumber = index + 1;
+    const monthCount = getSavedCountForMonth(monthNumber);
     const monthButton = document.createElement("button");
     monthButton.type = "button";
     monthButton.className = `insta-liked-overlay-month-chip${
-      overlayState.selectedMonth === index + 1 ? " is-active" : ""
+      overlayState.selectedMonth === monthNumber ? " is-active" : ""
     }`;
-    monthButton.textContent = monthName.slice(0, 3);
+    const monthLabel = document.createElement("span");
+    monthLabel.className = "insta-liked-overlay-month-chip-label";
+    monthLabel.textContent = monthName.slice(0, 3);
+    monthButton.appendChild(monthLabel);
+
+    const monthMeta = document.createElement("span");
+    monthMeta.className = "insta-liked-overlay-month-chip-meta";
+    monthMeta.textContent = String(monthCount);
+    monthButton.appendChild(monthMeta);
     monthButton.addEventListener("click", () => {
       overlayState.monthPickerOpen = false;
-      void setSelectedMonth(overlayState.selectedYear, index + 1);
+      void setSelectedMonth(overlayState.selectedYear, monthNumber);
     });
     monthGrid.appendChild(monthButton);
   });
@@ -480,25 +539,15 @@ function buildOverlayMonthView(monthSections) {
   titleGroup.appendChild(title);
   titleGroup.appendChild(meta);
 
-  const fetchButton = document.createElement("button");
-  fetchButton.type = "button";
-  fetchButton.className = "insta-liked-overlay-button";
-  fetchButton.disabled = Boolean(overlayState.activeChunkKey);
-  fetchButton.textContent = overlayState.activeChunkKey ? "Fetching" : "Fetch";
-  fetchButton.addEventListener("click", () => {
-    void fetchMonth();
-  });
-
   toolbar.appendChild(titleGroup);
-  toolbar.appendChild(fetchButton);
   wrapper.appendChild(toolbar);
 
-  if (overlayState.activeChunkKey && overlayState.progress) {
+  if (overlayState.fetchInProgress && overlayState.fetchStatusText) {
     const progress = document.createElement("div");
     progress.className = "insta-liked-overlay-progress is-processing";
     const progressText = document.createElement("div");
     progressText.className = "insta-liked-overlay-progress-text";
-    progressText.textContent = `${overlayState.activeChunkLabel || "Fetching"} • ${overlayState.progress.itemCount || 0} items • ${overlayState.progress.pageCount || 0}p`;
+    progressText.textContent = overlayState.fetchStatusText;
     progress.appendChild(progressText);
     wrapper.appendChild(progress);
   }
@@ -567,13 +616,175 @@ function buildThumbButton(item) {
   return thumb;
 }
 
-async function fetchChunk(chunk) {
-  if (overlayState.activeChunkKey) {
+async function fetchMonth() {
+  if (overlayState.fetchInProgress) {
     return;
   }
 
-  overlayState.activeChunkKey = chunk.storageKey;
-  overlayState.activeChunkLabel = `${chunk.startDate} to ${chunk.endDate}`;
+  const year = overlayState.selectedYear;
+  const month = overlayState.selectedMonth;
+  const chunks = buildMonthChunks(year, month);
+
+  try {
+    startFetchSession(`Preparing ${getMonthNames()[month - 1]} ${year}`);
+
+    for (const chunk of chunks) {
+      if (await isResultKeySaved(chunk.storageKey)) {
+        continue;
+      }
+
+      const saved = await fetchAndSaveWeekChunk(chunk, year, month);
+      await refreshOverlayStateAfterSave();
+      if (!saved) {
+        break;
+      }
+      await delay(2500);
+    }
+  } finally {
+    finishFetchSession();
+  }
+}
+
+async function fetchYear() {
+  if (overlayState.fetchInProgress) {
+    return;
+  }
+
+  const year = overlayState.selectedYear;
+  const yearRange = {
+    startDate: formatDateParts(year, 1, 1),
+    endDate: formatDateParts(year, 12, 31)
+  };
+
+  try {
+    startFetchSession(`Checking ${year}`);
+
+    const yearHasPosts = await probeRangeHasItems({
+      ...yearRange,
+      year,
+      month: null,
+      label: `year_${year}`,
+      statusText: `Checking ${year}`
+    });
+    if (!yearHasPosts) {
+      overlayState.fetchStatusText = `No posts found in ${year}`;
+      persistOverlayState();
+      renderOverlay();
+      return;
+    }
+
+    const quarterRanges = buildQuarterRanges(year);
+    const monthNumbersWithPosts: number[] = [];
+
+    for (const quarter of quarterRanges) {
+      const quarterHasPosts = await probeRangeHasItems({
+        startDate: quarter.startDate,
+        endDate: quarter.endDate,
+        year,
+        month: null,
+        label: `quarter_${quarter.index}`,
+        statusText: `Checking Q${quarter.index} ${year}`
+      });
+      if (!quarterHasPosts) {
+        continue;
+      }
+
+      for (const monthNumber of quarter.months) {
+        const monthRange = buildMonthRange(year, monthNumber);
+        const monthHasPosts = await probeRangeHasItems({
+          startDate: monthRange.startDate,
+          endDate: monthRange.endDate,
+          year,
+          month: monthNumber,
+          label: `month_${year}_${String(monthNumber).padStart(2, "0")}`,
+          statusText: `Checking ${getMonthNames()[monthNumber - 1]} ${year}`
+        });
+        if (monthHasPosts) {
+          monthNumbersWithPosts.push(monthNumber);
+        }
+      }
+    }
+
+    for (const monthNumber of monthNumbersWithPosts) {
+      for (const chunk of buildMonthChunks(year, monthNumber)) {
+        if (await isResultKeySaved(chunk.storageKey)) {
+          continue;
+        }
+
+        const saved = await fetchAndSaveWeekChunk(chunk, year, monthNumber);
+        await refreshOverlayStateAfterSave();
+        if (!saved) {
+          return;
+        }
+        await delay(2500);
+      }
+    }
+  } finally {
+    finishFetchSession();
+  }
+}
+
+async function fetchAndSaveWeekChunk(chunk, year, month) {
+  const result = await extractRange({
+    requestKey: chunk.storageKey,
+    statusText: `Fetched 0 items in week ${chunk.index}`,
+    onProgress: (itemCount) => {
+      overlayState.fetchStatusText = `Fetched ${itemCount} items in week ${chunk.index}`;
+    },
+    payload: {
+      startDate: chunk.startDate,
+      endDate: chunk.endDate,
+      year,
+      month,
+      label: "range_chunk",
+      sort: "oldest_to_newest",
+      maxPages: 100
+    }
+  });
+  if (!result) {
+    return false;
+  }
+
+  const saved = await chrome.runtime.sendMessage({
+    type: "SAVE_EXTRACTION_RESULT",
+    result
+  }).catch(() => null);
+  if (!saved?.ok) {
+    throw new Error(saved?.error || "Failed to save extracted items.");
+  }
+
+  overlayState.latestSummaryText = formatLatestSummaryText(saved.payload?.result || result);
+  return true;
+}
+
+async function probeRangeHasItems({ startDate, endDate, year, month, label, statusText }) {
+  const result: any = await extractRange({
+    requestKey: `probe:${label}:${startDate}:${endDate}`,
+    statusText,
+    payload: {
+      startDate,
+      endDate,
+      year,
+      month,
+      label,
+      sort: "oldest_to_newest",
+      maxPages: 1
+    }
+  });
+  return Boolean(result && Number(result.count || 0) > 0);
+}
+
+async function extractRange({ requestKey, statusText, payload, onProgress = null }) {
+  if (overlayState.activeRequestKey) {
+    return null;
+  }
+
+  overlayState.activeRequestKey = requestKey;
+  overlayState.activeWeekIndex =
+    payload?.label === "range_chunk"
+      ? Number(findWeekIndexForDates(payload.startDate, payload.endDate) || 0)
+      : null;
+  overlayState.fetchStatusText = statusText;
   overlayState.progress = {
     itemCount: 0,
     pageCount: 0
@@ -582,75 +793,113 @@ async function fetchChunk(chunk) {
   renderOverlay();
 
   try {
-    const result = await runPageCommand(
-      "EXTRACT_RANGE",
-      {
-        startDate: chunk.startDate,
-        endDate: chunk.endDate,
-        year: overlayState.selectedYear,
-        month: overlayState.selectedMonth,
-        label: "range_chunk",
-        sort: "oldest_to_newest",
-        maxPages: 100
-      },
-      {
-        onProgress: (payload) => {
-          overlayState.progress = {
-            itemCount: Number(payload?.itemCount || overlayState.progress?.itemCount || 0),
-            pageCount: Number(payload?.pageCount || overlayState.progress?.pageCount || 0)
-          };
-          persistOverlayState();
-          renderOverlay();
+    const result = await runPageCommand("EXTRACT_RANGE", payload, {
+      onProgress: (progressPayload) => {
+        const itemCount = Number(progressPayload?.itemCount || overlayState.progress?.itemCount || 0);
+        overlayState.progress = {
+          itemCount,
+          pageCount: Number(progressPayload?.pageCount || overlayState.progress?.pageCount || 0)
+        };
+        if (typeof onProgress === "function") {
+          onProgress(itemCount, progressPayload);
         }
+        persistOverlayState();
+        renderOverlay();
       }
-    );
+    });
 
-    const saved = await chrome.runtime.sendMessage({
-      type: "SAVE_EXTRACTION_RESULT",
-      result
-    }).catch(() => null);
-    if (!saved?.ok) {
-      throw new Error(saved?.error || "Failed to save extracted items.");
-    }
-
-    overlayState.extractorStatusText = "Ready";
-    overlayState.latestSummaryText = formatLatestSummaryText(saved.payload?.result || result);
-    await refreshOverlaySummaries();
-    persistOverlayState();
-    return true;
+    return result;
   } catch (error) {
     console.error("[insta-likes-ext] extraction failed", error);
-    overlayState.extractorStatusText = "Error";
-    persistOverlayState();
-    return false;
+    return null;
   } finally {
-    overlayState.activeChunkKey = null;
-    overlayState.activeChunkLabel = null;
-    overlayState.progress = null;
+    overlayState.activeRequestKey = null;
+    overlayState.activeWeekIndex = null;
     persistOverlayState();
-    renderOverlay();
   }
 }
 
-async function fetchMonth() {
-  if (overlayState.activeChunkKey) {
+async function refreshOverlayStateAfterSave() {
+  await refreshYearMonthCounts();
+  await refreshOverlaySummaries();
+  persistOverlayState();
+  renderOverlay();
+}
+
+function startFetchSession(statusText) {
+  overlayState.fetchMenuOpen = false;
+  overlayState.fetchInProgress = true;
+  overlayState.fetchStatusText = statusText;
+  persistOverlayState();
+  renderOverlay();
+}
+
+function finishFetchSession() {
+  overlayState.fetchInProgress = false;
+  overlayState.activeRequestKey = null;
+  overlayState.activeWeekIndex = null;
+  overlayState.fetchStatusText = "";
+  overlayState.progress = null;
+  persistOverlayState();
+  renderOverlay();
+
+  flushQueuedNavigation();
+}
+
+async function isResultKeySaved(storageKey) {
+  const response = await chrome.runtime.sendMessage({
+    type: "GET_RESULT_SUMMARIES",
+    keys: [storageKey]
+  }).catch(() => null);
+  return Boolean(response?.ok && response.summariesByKey && response.summariesByKey[storageKey]);
+}
+
+function buildQuarterRanges(year) {
+  return [
+    { index: 1, months: [1, 2, 3] },
+    { index: 2, months: [4, 5, 6] },
+    { index: 3, months: [7, 8, 9] },
+    { index: 4, months: [10, 11, 12] }
+  ].map((quarter) => {
+    const firstMonth = quarter.months[0];
+    const lastMonth = quarter.months[quarter.months.length - 1];
+    return {
+      ...quarter,
+      startDate: formatDateParts(year, firstMonth, 1),
+      endDate: formatDateParts(year, lastMonth, new Date(Date.UTC(year, lastMonth, 0)).getUTCDate())
+    };
+  });
+}
+
+function buildMonthRange(year, month) {
+  return {
+    startDate: formatDateParts(year, month, 1),
+    endDate: formatDateParts(year, month, new Date(Date.UTC(year, month, 0)).getUTCDate())
+  };
+}
+
+function findWeekIndexForDates(startDate, endDate) {
+  const match = String(startDate || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const chunk = buildMonthChunks(year, month).find(
+    (entry) => entry.startDate === startDate && entry.endDate === endDate
+  );
+  return chunk?.index || null;
+}
+
+function flushQueuedNavigation() {
+  if (!overlayState.pendingNavigationUrl) {
     return;
   }
 
-  const chunks = buildMonthChunks(overlayState.selectedYear, overlayState.selectedMonth);
-
-  for (const chunk of chunks) {
-    if (hasSavedSection(chunk.storageKey)) {
-      continue;
-    }
-
-    const ok = await fetchChunk(chunk);
-    await refreshOverlaySummaries();
-    if (!ok) {
-      break;
-    }
-    await delay(2500);
-  }
+  const pendingUrl = overlayState.pendingNavigationUrl;
+  overlayState.pendingNavigationUrl = null;
+  postPageCommand("NAVIGATE_TO_MEDIA", { url: pendingUrl });
 }
 
 function installInteractionOverride() {
@@ -796,6 +1045,13 @@ async function openBoundCard(card, url) {
   if (panel instanceof HTMLElement) {
     overlayState.monthScrollTopByKey[getSelectedMonthStorageKey()] = panel.scrollTop;
     persistOverlayState();
+  }
+
+  if (overlayState.fetchInProgress) {
+    overlayState.pendingNavigationUrl = url;
+    persistOverlayState();
+    emitDebugEvent({ stage: "click-queued-during-fetch", url, requestKey: overlayState.activeRequestKey });
+    return;
   }
 
   card.dataset.instaLikedOpening = "true";
@@ -1111,8 +1367,6 @@ function restoreOverlayState() {
       Number.isFinite(selectedMonth) && selectedMonth >= 1 && selectedMonth <= 12
         ? selectedMonth
         : overlayState.selectedMonth;
-    overlayState.navigationMode =
-      saved.navigationMode === "random" ? "random" : overlayState.navigationMode;
     overlayState.collapsed = Boolean(saved.collapsed);
     if (typeof saved.latestSummaryText === "string" && saved.latestSummaryText) {
       overlayState.latestSummaryText = saved.latestSummaryText;
@@ -1133,7 +1387,6 @@ function persistOverlayState() {
       JSON.stringify({
         selectedYear: overlayState.selectedYear,
         selectedMonth: overlayState.selectedMonth,
-        navigationMode: overlayState.navigationMode,
         collapsed: overlayState.collapsed,
         latestSummaryText: overlayState.latestSummaryText,
         monthScrollTopByKey: overlayState.monthScrollTopByKey
@@ -1233,10 +1486,11 @@ async function navigateActiveDetail(offset) {
     return;
   }
 
-  const nextIndex =
-    overlayState.navigationMode === "random"
-      ? getRandomDetailIndex(detail.items.length, getActiveDetailNavigationState()?.index ?? -1)
-      : getSequentialDetailIndex(detail.items.length, offset, getActiveDetailNavigationState()?.index ?? 0);
+  const nextIndex = getSequentialDetailIndex(
+    detail.items.length,
+    offset,
+    getActiveDetailNavigationState()?.index ?? 0
+  );
   const nextItem = detail.items[nextIndex];
   if (!nextItem?.canonicalUrl) {
     return;
@@ -1257,18 +1511,6 @@ async function navigateActiveDetail(offset) {
 
 function getSequentialDetailIndex(length, offset, currentIndex) {
   return ((currentIndex + offset) % length + length) % length;
-}
-
-function getRandomDetailIndex(length, currentIndex) {
-  if (length <= 1) {
-    return 0;
-  }
-
-  let nextIndex = currentIndex;
-  while (nextIndex === currentIndex) {
-    nextIndex = Math.floor(Math.random() * length);
-  }
-  return nextIndex;
 }
 
 function normalizePath(pathname) {
@@ -1302,15 +1544,14 @@ function getMonthNames() {
 
 function buildMonthChunks(year, month) {
   const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
-  const baseSize = Math.floor(daysInMonth / 5);
-  const remainder = daysInMonth % 5;
   const chunks = [];
   let currentDay = 1;
+  let index = 0;
 
-  for (let index = 0; index < 5; index += 1) {
-    const dayCount = baseSize + (index < remainder ? 1 : 0);
+  while (currentDay <= daysInMonth) {
     const startDay = currentDay;
-    const endDay = currentDay + dayCount - 1;
+    const endDay = Math.min(currentDay + 6, daysInMonth);
+    const dayCount = endDay - startDay + 1;
     const startDate = formatDateParts(year, month, startDay);
     const endDate = formatDateParts(year, month, endDay);
 
@@ -1323,39 +1564,34 @@ function buildMonthChunks(year, month) {
     });
 
     currentDay = endDay + 1;
+    index += 1;
   }
 
   return chunks;
 }
 
-function buildOverlayStatusText(status) {
-  return "Ready";
+function canFetchMonth() {
+  return Boolean(overlayState.hasRefreshTemplate);
 }
 
-function getDisplayStatusText() {
-  if (overlayState.activeChunkKey) {
-    return "Fetching";
+function getFetchButtonToneClass() {
+  if (overlayState.fetchInProgress) {
+    return "is-busy";
   }
 
-  return overlayState.extractorStatusText;
+  return canFetchMonth() ? "is-neutral" : "is-unavailable";
 }
 
-function getExtractorStatusLabel(status) {
-  if (status?.ready) {
-    return buildOverlayStatusText(status);
+function getFetchButtonTitle() {
+  if (overlayState.fetchInProgress) {
+    return "A fetch session is currently running.";
   }
 
-  if (overlayState.activeChunkKey) {
-    return "Fetching";
+  if (canFetchMonth()) {
+    return "Fetch unsaved weekly ranges for this month.";
   }
 
-  return "Capture";
-}
-
-function getExtractorStatusToneClass() {
-  return overlayState.hasRefreshTemplate
-    ? "is-ready"
-    : "is-needs-capture";
+  return "Open the Instagram likes page and let it load once so the extractor can capture a fresh request template.";
 }
 
 function createIconButton(title, iconSvg) {
@@ -1408,21 +1644,19 @@ function buildIconSvg(iconName) {
     `;
   }
 
-  if (iconName === "shuffle") {
+  if (iconName === "check") {
     return `
       <svg viewBox="0 0 24 24" aria-hidden="true" class="insta-liked-overlay-icon">
-        <path d="M16 3h5v5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/>
-        <path d="m4 20 6.5-6.5m3-3L20 4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/>
-        <path d="M16 16h5v5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/>
-        <path d="m4 4 6.5 6.5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/>
+        <path d="m5 12 4.2 4.2L19 6.5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/>
       </svg>
     `;
   }
 
-  if (iconName === "list") {
+  if (iconName === "spinner") {
     return `
-      <svg viewBox="0 0 24 24" aria-hidden="true" class="insta-liked-overlay-icon">
-        <path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/>
+      <svg viewBox="0 0 24 24" aria-hidden="true" class="insta-liked-overlay-icon insta-liked-overlay-icon-spinner">
+        <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-opacity="0.28" stroke-width="2"/>
+        <path d="M12 4a8 8 0 0 1 8 8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2"/>
       </svg>
     `;
   }
@@ -1453,12 +1687,12 @@ function getSectionStorageKey(result) {
   return `instagram_liked_posts_${result?.year}_${String(result?.month || "").padStart(2, "0")}`;
 }
 
-function hasSavedSection(storageKey) {
-  return overlayState.activeMonthResults.some((result) => getSectionStorageKey(result) === storageKey);
-}
-
 function formatSectionDateLabel(sectionData) {
   return `${formatDayInMonth(sectionData.startDate)} to ${formatDayInMonth(sectionData.endDate)}`;
+}
+
+function getSavedCountForMonth(month) {
+  return Number(overlayState.monthCountsByYear?.[month] || 0);
 }
 
 function formatDayInMonth(dateString) {
@@ -1583,7 +1817,9 @@ function installStyles() {
       top: 12px;
       right: 12px;
       z-index: 2147483645;
-      width: min(360px, calc(100vw - 24px));
+      width: min(420px, calc(100vw - 24px));
+      min-width: 380px;
+      min-height: 320px;
       max-height: calc(100vh - 24px);
       overflow: auto;
       padding: 10px;
@@ -1609,46 +1845,15 @@ function installStyles() {
     }
 
     .insta-liked-overlay-header {
-      display: flex;
-      align-items: stretch;
-      gap: 8px;
+      display: block;
       margin-bottom: 8px;
     }
 
-    .insta-liked-overlay-status-badge {
-      flex: 1 1 auto;
-      min-width: 0;
-      border: 1px solid #3a2020;
-      border-radius: 10px;
-      padding: 0 12px;
-      height: 36px;
-      display: flex;
-      align-items: center;
-      font-size: 12px;
-      font-weight: 600;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      background: #1a0d0d;
-      color: #ffb4b4;
-    }
-
-    .insta-liked-overlay-status-badge.is-ready {
-      border-color: #1d472f;
-      background: #0d1712;
-      color: #9ff0bf;
-    }
-
-    .insta-liked-overlay-status-badge.is-needs-capture {
-      border-color: #4d2222;
-      background: #1c0f0f;
-      color: #f4aaaa;
-    }
-
     .insta-liked-overlay-top-controls {
-      display: flex;
-      gap: 4px;
-      align-items: stretch;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 6px;
+      align-items: center;
     }
 
     .insta-liked-overlay-top-controls button,
@@ -1679,12 +1884,14 @@ function installStyles() {
 
     .insta-liked-overlay-month-picker-shell {
       position: relative;
-      flex: 0 0 auto;
+      grid-column: 2;
+      justify-self: center;
     }
 
     .insta-liked-overlay-month-trigger {
       height: 36px;
-      max-width: 160px;
+      min-width: 112px;
+      max-width: 168px;
       display: inline-flex;
       align-items: center;
       gap: 6px;
@@ -1716,25 +1923,58 @@ function installStyles() {
       margin-left: 2px;
     }
 
-    .insta-liked-overlay-mode-button {
-      border: 1px solid #363636;
-      border-radius: 10px;
-      background: #101010;
-      color: #a8a8a8;
-      width: 36px;
-      height: 36px;
-      padding: 0;
-      font: inherit;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
+    .insta-liked-overlay-header-fetch {
+      grid-column: 1;
+      justify-self: start;
+      min-width: 104px;
+      border-top-right-radius: 0;
+      border-bottom-right-radius: 0;
     }
 
-    .insta-liked-overlay-mode-button.is-active {
-      background: #f5f5f5;
-      color: #000;
-      border-color: #f5f5f5;
+    .insta-liked-overlay-fetch-shell {
+      position: relative;
+      grid-column: 1;
+      justify-self: start;
+      display: inline-flex;
+      align-items: stretch;
+    }
+
+    .insta-liked-overlay-fetch-menu-toggle {
+      min-width: 34px;
+      padding: 0 8px;
+      border-left-width: 0;
+      border-top-left-radius: 0;
+      border-bottom-left-radius: 0;
+    }
+
+    .insta-liked-overlay-fetch-menu {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      z-index: 1;
+      display: grid;
+      min-width: 132px;
+      padding: 6px;
+      border: 1px solid #1f1f1f;
+      border-radius: 10px;
+      background: #080808;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.48);
+    }
+
+    .insta-liked-overlay-fetch-menu-item {
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      background: #121212;
+      color: #f5f5f5;
+      padding: 8px 10px;
+      text-align: left;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .insta-liked-overlay-header-close {
+      grid-column: 3;
+      justify-self: end;
     }
 
     .insta-liked-overlay-picker {
@@ -1776,15 +2016,34 @@ function installStyles() {
       border-radius: 8px;
       background: #121212;
       color: #a8a8a8;
-      padding: 7px 0;
+      padding: 7px 8px;
       font: inherit;
       cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      text-align: left;
+    }
+
+    .insta-liked-overlay-month-chip-label {
+      font-weight: 600;
+    }
+
+    .insta-liked-overlay-month-chip-meta {
+      font-size: 10px;
+      color: #7f7f7f;
+      margin-left: auto;
     }
 
     .insta-liked-overlay-month-chip.is-active {
       background: #f5f5f5;
       color: #000;
       border-color: #f5f5f5;
+    }
+
+    .insta-liked-overlay-month-chip.is-active .insta-liked-overlay-month-chip-meta {
+      color: rgba(0, 0, 0, 0.6);
     }
 
     .insta-liked-overlay-month {
@@ -1799,7 +2058,7 @@ function installStyles() {
 
     .insta-liked-overlay-month-toolbar {
       display: flex;
-      justify-content: space-between;
+      justify-content: flex-start;
       gap: 8px;
       align-items: center;
     }
@@ -1871,11 +2130,30 @@ function installStyles() {
 
     .insta-liked-overlay-button {
       cursor: pointer;
-      min-width: 64px;
+      min-width: 88px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 6px;
+      font-weight: 700;
+    }
+
+    .insta-liked-overlay-button.is-neutral {
+      border-color: #363636;
+      background: #121212;
+      color: #f5f5f5;
+    }
+
+    .insta-liked-overlay-button.is-unavailable {
+      border-color: #6b2424;
+      background: #2a1111;
+      color: #ffb0b0;
+    }
+
+    .insta-liked-overlay-button.is-busy {
+      border-color: #5f5f5f;
+      background: #1c1c1c;
+      color: #f5f5f5;
     }
 
     .insta-liked-overlay-button:disabled {
@@ -1909,6 +2187,10 @@ function installStyles() {
       z-index: 1;
     }
 
+    .insta-liked-overlay-icon-spinner {
+      animation: insta-liked-spin 1s linear infinite;
+    }
+
     @keyframes insta-liked-scan {
       0% {
         transform: translateX(-100%);
@@ -1917,7 +2199,14 @@ function installStyles() {
         transform: translateX(100%);
       }
     }
+
+    @keyframes insta-liked-spin {
+      100% {
+        transform: rotate(360deg);
+      }
+    }
   `;
 
   (document.head || document.documentElement).appendChild(style);
 }
+})();

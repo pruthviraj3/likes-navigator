@@ -1,3 +1,4 @@
+(() => {
 const CACHE_STORAGE_KEY = "instaLikedCache";
 const MONTH_RESULTS_STORAGE_KEY = "instaLikedMonthResults";
 const DB_NAME = "instaLikedNavigator";
@@ -65,6 +66,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "GET_MONTH_RESULTS") {
     getMonthResults(Number(message.year), Number(message.month))
       .then((results) => sendResponse({ ok: true, results }))
+      .catch((error) => sendResponse({ ok: false, error: String(error) }));
+
+    return true;
+  }
+
+  if (message.type === "GET_YEAR_MONTH_COUNTS") {
+    getYearMonthCounts(Number(message.year))
+      .then((countsByMonth) => sendResponse({ ok: true, countsByMonth }))
       .catch((error) => sendResponse({ ok: false, error: String(error) }));
 
     return true;
@@ -191,7 +200,7 @@ async function getMonthResults(year, month) {
   }
 
   const state = await getMonthResultsState();
-  return Object.values(state.resultsByKey)
+  return Object.values((state.resultsByKey || {}) as Record<string, any>)
     .filter((result) => {
       return Number(result?.year) === normalizedYear && Number(result?.month) === normalizedMonth;
     })
@@ -200,6 +209,28 @@ async function getMonthResults(year, month) {
       const rightDate = String(right?.start_date || "");
       return leftDate.localeCompare(rightDate);
     });
+}
+
+async function getYearMonthCounts(year) {
+  const normalizedYear = Number(year);
+  if (!Number.isFinite(normalizedYear)) {
+    return {};
+  }
+
+  const state = await getMonthResultsState();
+  const countsByMonth = {};
+
+  for (const result of Object.values((state.resultsByKey || {}) as Record<string, any>)) {
+    const resultYear = Number(result?.year);
+    const resultMonth = Number(result?.month);
+    if (!Number.isFinite(resultYear) || !Number.isFinite(resultMonth) || resultYear !== normalizedYear) {
+      continue;
+    }
+
+    countsByMonth[resultMonth] = Number(countsByMonth[resultMonth] || 0) + Number(result?.count || 0);
+  }
+
+  return countsByMonth;
 }
 
 async function getExtractorStatusForActiveTab() {
@@ -530,7 +561,7 @@ async function readState(id) {
 
 async function writeState(id, value) {
   const db = await getDb();
-  return new Promise((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
     const transaction = db.transaction(APP_STATE_STORE, "readwrite");
     const store = transaction.objectStore(APP_STATE_STORE);
     const request = store.put({ id, value });
@@ -551,7 +582,7 @@ async function readImageBlob(mediaId) {
   }
 
   const db = await getDb();
-  return new Promise((resolve, reject) => {
+  return new Promise<any>((resolve, reject) => {
     const transaction = db.transaction(IMAGE_STORE, "readonly");
     const store = transaction.objectStore(IMAGE_STORE);
     const request = store.get(mediaId);
@@ -563,7 +594,7 @@ async function readImageBlob(mediaId) {
 
 async function writeImageBlob(mediaId, value) {
   const db = await getDb();
-  return new Promise((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
     const transaction = db.transaction(IMAGE_STORE, "readwrite");
     const store = transaction.objectStore(IMAGE_STORE);
     const request = store.put({ ...value, mediaId });
@@ -709,8 +740,8 @@ function inferImageContentType(urlString) {
   return "image/jpeg";
 }
 
-function extractImageKeys(urlString) {
-  const keys = new Set();
+function extractImageKeys(urlString: string): string[] {
+  const keys = new Set<string>();
 
   try {
     const url = new URL(urlString);
@@ -727,3 +758,4 @@ function extractImageKeys(urlString) {
 
   return [...keys];
 }
+})();

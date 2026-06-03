@@ -14,7 +14,7 @@
     "https://*.cdninstagram.com/*"
   ],
   "background": {
-    "service_worker": "background.js",
+    "service_worker": "build/background.js",
     "type": "module"
   },
   "content_scripts": [
@@ -23,7 +23,7 @@
         "https://www.instagram.com/*"
       ],
       "js": [
-        "page-bridge.js"
+        "build/page-bridge.js"
       ],
       "run_at": "document_start",
       "world": "MAIN"
@@ -33,7 +33,7 @@
         "https://www.instagram.com/*"
       ],
       "js": [
-        "content-script.js"
+        "build/content-script.js"
       ],
       "run_at": "document_start"
     }

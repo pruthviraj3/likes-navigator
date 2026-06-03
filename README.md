@@ -2,6 +2,12 @@
 
 Chrome extension prototype for `https://www.instagram.com/your_activity/interactions/likes/`.
 
+Code layout:
+
+- TypeScript source lives in `src/`.
+- Compiled extension files are emitted to `build/`.
+- `manifest.json` loads the compiled files from `build/`.
+
 What it does now:
 
 - Injects a page-context `fetch` interceptor on Instagram.
@@ -41,10 +47,17 @@ Storage notes:
 
 How to load it:
 
-1. Open `chrome://extensions`.
-2. Enable Developer Mode.
-3. Click `Load unpacked`.
-4. Select this folder: `/Users/codetorso/Desktop/insta-extension`
+1. Run `npm install`.
+2. Run `npm run build`.
+3. Open `chrome://extensions`.
+4. Enable Developer Mode.
+5. Click `Load unpacked`.
+6. Select this folder: `/Users/codetorso/Desktop/insta-extension`
+
+Development:
+
+- Rebuild after changes with `npm run build`.
+- For continuous compilation, use `npm run watch`.
 
 Notes:
 
