@@ -33,6 +33,7 @@ const overlayState = {
   activeRequestKey: null,
   activeWeekIndex: null,
   fetchStatusText: "",
+  exportInProgress: false,
   monthScrollTopByKey: {},
   pendingScrollRestore: false,
   progress: null,
@@ -335,6 +336,7 @@ function buildOverlayHeader() {
 
   controls.appendChild(buildHeaderFetchButton());
   controls.appendChild(buildHeaderMonthPickerTrigger());
+  controls.appendChild(buildHeaderExportButton());
 
   const closeButton = createIconButton("Close", buildIconSvg("close"));
   closeButton.classList.add("insta-liked-overlay-header-close");
@@ -398,6 +400,65 @@ function buildHeaderFetchButton() {
   }
 
   return shell;
+}
+
+function buildHeaderExportButton() {
+  const button = createIconButton(
+    overlayState.exportInProgress ? "Exporting fetched posts and images" : "Export fetched posts and images",
+    overlayState.exportInProgress ? buildIconSvg("spinner") : buildIconSvg("export")
+  );
+  button.classList.add("insta-liked-overlay-export-button");
+  button.disabled = Boolean(overlayState.exportInProgress);
+  button.addEventListener("click", () => {
+    void exportFetchedData();
+  });
+  return button;
+}
+
+async function exportFetchedData() {
+  if (overlayState.exportInProgress) {
+    return;
+  }
+
+  overlayState.exportInProgress = true;
+  renderOverlay();
+
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "EXPORT_FETCHED_DATA" }).catch((error) => ({
+      ok: false,
+      error: String(error)
+    }));
+    if (!response?.ok) {
+      throw new Error(response?.error || "Failed to export fetched data.");
+    }
+
+    downloadJson(response.exportData, response.filename || buildExportFilename());
+  } catch (error) {
+    console.error("[insta-likes-ext] export failed", error);
+    window.alert(error instanceof Error ? error.message : String(error));
+  } finally {
+    overlayState.exportInProgress = false;
+    renderOverlay();
+  }
+}
+
+function downloadJson(data, filename) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json"
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.documentElement.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function buildExportFilename() {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `instagram-liked-posts-export-${timestamp}.json`;
 }
 
 async function shiftOverlayYear(offset) {
@@ -1661,6 +1722,15 @@ function buildIconSvg(iconName) {
     `;
   }
 
+  if (iconName === "export") {
+    return `
+      <svg viewBox="0 0 24 24" aria-hidden="true" class="insta-liked-overlay-icon">
+        <path d="M12 3v10m0-10 4 4m-4-4-4 4" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/>
+        <path d="M5 13v5a3 3 0 0 0 3 3h8a3 3 0 0 0 3-3v-5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/>
+      </svg>
+    `;
+  }
+
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" class="insta-liked-overlay-icon">
       <path d="M6 6 18 18M18 6 6 18" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/>
@@ -1851,7 +1921,7 @@ function installStyles() {
 
     .insta-liked-overlay-top-controls {
       display: grid;
-      grid-template-columns: 1fr auto 1fr;
+      grid-template-columns: 1fr auto auto 1fr;
       gap: 6px;
       align-items: center;
     }
@@ -1886,6 +1956,11 @@ function installStyles() {
       position: relative;
       grid-column: 2;
       justify-self: center;
+    }
+
+    .insta-liked-overlay-export-button {
+      grid-column: 3;
+      justify-self: start;
     }
 
     .insta-liked-overlay-month-trigger {
@@ -1973,7 +2048,7 @@ function installStyles() {
     }
 
     .insta-liked-overlay-header-close {
-      grid-column: 3;
+      grid-column: 4;
       justify-self: end;
     }
 

@@ -87,6 +87,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "EXPORT_FETCHED_DATA") {
+    buildFetchedDataExport()
+      .then((payload) => sendResponse({ ok: true, ...payload }))
+      .catch((error) => sendResponse({ ok: false, error: String(error) }));
+
+    return true;
+  }
+
   if (message.type === "GET_MEDIA_FOR_IMAGE_KEY") {
     readCache().then((cache) => {
       const mediaId = cache.imageKeyToMediaId[message.imageKey];
@@ -282,6 +290,55 @@ async function saveExtractionResult(result) {
     },
     imageStorage
   };
+}
+
+async function buildFetchedDataExport() {
+  const [cache, monthState, imageRecords] = await Promise.all([
+    readCache(),
+    getMonthResultsState(),
+    readAllImageBlobs()
+  ]);
+
+  const images = [];
+  for (const record of imageRecords) {
+    const blob = record?.blob;
+    if (!(blob instanceof Blob)) {
+      continue;
+    }
+
+    images.push({
+      mediaId: String(record.mediaId || ""),
+      resultKey: String(record.resultKey || ""),
+      sourceUrl: String(record.sourceUrl || ""),
+      contentType: String(record.contentType || blob.type || "application/octet-stream"),
+      size: Number(record.size || blob.size || 0),
+      savedAt: String(record.savedAt || ""),
+      dataBase64: await blobToBase64(blob)
+    });
+  }
+
+  const exportData = {
+    source: "instagram_liked_posts_extension",
+    exportedAt: new Date().toISOString(),
+    summary: {
+      resultCount: Object.keys(monthState.resultsByKey || {}).length,
+      postCount: Object.keys(cache.itemsByMediaId || {}).length,
+      imageCount: images.length
+    },
+    cache,
+    fetchedResults: monthState,
+    images
+  };
+
+  return {
+    filename: buildExportFilename(),
+    exportData
+  };
+}
+
+function buildExportFilename() {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `instagram-liked-posts-export-${timestamp}.json`;
 }
 
 async function saveMonthResult(result) {
@@ -592,6 +649,18 @@ async function readImageBlob(mediaId) {
   });
 }
 
+async function readAllImageBlobs() {
+  const db = await getDb();
+  return new Promise<any[]>((resolve, reject) => {
+    const transaction = db.transaction(IMAGE_STORE, "readonly");
+    const store = transaction.objectStore(IMAGE_STORE);
+    const request = store.getAll();
+
+    request.onsuccess = () => resolve(Array.isArray(request.result) ? request.result : []);
+    request.onerror = () => reject(request.error || new Error("Failed to read stored images."));
+  });
+}
+
 async function writeImageBlob(mediaId, value) {
   const db = await getDb();
   return new Promise<void>((resolve, reject) => {
@@ -626,6 +695,18 @@ async function fetchImageBlob(imageUrl) {
   }
 
   return blob;
+}
+
+async function blobToBase64(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const chunkSize = 0x8000;
+  let binary = "";
+
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+
+  return btoa(binary);
 }
 
 async function getActiveInstagramTab() {
