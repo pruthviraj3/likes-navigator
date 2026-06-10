@@ -1,67 +1,59 @@
 # Instagram Likes Navigator
 
-Chrome extension prototype for `https://www.instagram.com/your_activity/interactions/likes/`.
+A Chrome extension for browsing and saving your liked Instagram posts from the Activity page.
 
-Code layout:
+It runs locally in your browser, uses your existing Instagram session, and stores extracted results in IndexedDB.
 
-- TypeScript source lives in `src/`.
-- Compiled extension files are emitted to `build/`.
-- `manifest.json` loads the compiled files from `build/`.
+## Features
 
-What it does now:
+- Fetch liked posts by month from Instagram's liked activity page
+- Save post metadata, thumbnails, and canonical post URLs locally
+- Navigate saved liked posts with in-page controls
+- Use `ArrowUp` and `ArrowDown` to move through the active thumbnail set
+- Keep large extraction results out of `chrome.storage.local` by using IndexedDB
 
-- Injects a page-context `fetch` interceptor on Instagram.
-- Captures liked-post payloads from:
-  - `com.instagram.privacy.activity_center.liked_media_screen`
-  - `com.instagram.privacy.activity_center.liked_next`
-  - `com.instagram.privacy.activity_center.liked_refresh`
-- Extracts `media_id`, `media_code`, thumbnail URL metadata, and a canonical `https://www.instagram.com/p/<code>/` URL.
-- Stores the normalized cache in IndexedDB.
-- Overrides clicks on liked-page thumbnails with `history.pushState` plus `popstate` routing so Instagram can switch posts in-page without a full site reload.
-- Adds `Up` and `Down` controls in the saved-results detail view, plus `ArrowUp` and `ArrowDown` keyboard navigation across the active thumbnail set.
-- Captures a fresh in-memory request template from the live Instagram page and reuses it to extract liked posts through Instagram's internal `async/wbloks/fetch` endpoints.
-- Saves month results in IndexedDB under keys like `instagram_liked_posts_2026_04`.
-- Shows a dark Instagram-style in-page overlay with one month-level fetch action. The extension still fetches smaller date ranges internally so a failed/rate-limited range does not discard already saved ranges.
+## Install
 
-How the monthly extractor works:
+```bash
+npm install
+npm run build
+```
 
-1. Open Instagram and navigate to `https://www.instagram.com/your_activity/interactions/likes/`.
-2. Let the page load once so the extension can capture a fresh `liked_refresh` request template from your current authenticated session.
-3. Use the in-page `Likes` overlay to fetch the visible month.
-4. The extractor runs in the Instagram page context, paginates via `liked_next`, deduplicates by `media_id`, stores each date range locally, and stores thumbnail image blobs in extension IndexedDB.
+Then load the extension in Chrome:
 
-Storage notes:
+1. Open `chrome://extensions`
+2. Enable **Developer mode**
+3. Click **Load unpacked**
+4. Select the project folder
 
-- Auth-bearing request fields such as `fb_dtsg`, `lsd`, and other form tokens are kept only in page memory and are not persisted to extension storage.
-- Cookies are never stored or manually attached. Requests use the browser's existing Instagram session with `credentials: "include"`.
-- Month result objects are stored separately from the click-navigation cache and include:
-  - `source`
-  - `year`
-  - `month`
-  - `sort`
-  - `time_zone`
-  - `extracted_at`
-  - `page_count`
-  - `count`
-  - `items`
+## Usage
 
-How to load it:
+1. Sign in to Instagram in Chrome.
+2. Open `https://www.instagram.com/your_activity/interactions/likes/`.
+3. Wait for the page to finish loading.
+4. Use the in-page **Likes** overlay to fetch the visible month.
+5. Open saved items and move through them with the on-page controls or arrow keys.
 
-1. Run `npm install`.
-2. Run `npm run build`.
-3. Open `chrome://extensions`.
-4. Enable Developer Mode.
-5. Click `Load unpacked`.
-6. Select this folder: `/Users/codetorso/Desktop/insta-extension`
+## Development
 
-Development:
+Build once:
 
-- Rebuild after changes with `npm run build`.
-- For continuous compilation, use `npm run watch`.
+```bash
+npm run build
+```
 
-Notes:
+Watch TypeScript files while developing:
 
-- Large cache and extraction payloads are stored in IndexedDB to avoid the `chrome.storage.local` quota ceiling.
-- If you previously used an older build, reload the extension once so the background worker can migrate any legacy `chrome.storage.local` data.
-- Matching is currently based on `ig_cache_key` and image pathname extracted from the thumbnail URL.
-- Instagram changes their payloads and DOM often. The extractor is built around live template capture rather than hardcoded request tokens, but it is still tied to the current liked-page response shape.
+```bash
+npm run watch
+```
+
+The extension source lives in `src/`. Compiled files are written to `build/`, which is intentionally ignored by Git.
+
+## Notes
+
+- Request tokens are captured from the live Instagram page and kept in page memory only.
+- Cookies are not stored manually. Requests use the browser's active Instagram session.
+- Instagram changes its internal payloads and DOM often, so this extension may need updates over time.
+
+If this project helps you, please consider leaving a star.
