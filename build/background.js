@@ -66,8 +66,14 @@
                 .catch((error) => sendResponse({ ok: false, error: String(error) }));
             return true;
         }
-        if (message.type === "EXPORT_FETCHED_DATA") {
-            buildFetchedDataExport()
+        if (message.type === "PREPARE_FETCHED_DATA_EXPORT") {
+            prepareFetchedDataExport()
+                .then((payload) => sendResponse({ ok: true, ...payload }))
+                .catch((error) => sendResponse({ ok: false, error: String(error) }));
+            return true;
+        }
+        if (message.type === "GET_EXPORT_IMAGE_BATCH") {
+            getExportImageBatch(Number(message.offset || 0), Number(message.limit || 10))
                 .then((payload) => sendResponse({ ok: true, ...payload }))
                 .catch((error) => sendResponse({ ok: false, error: String(error) }));
             return true;
@@ -239,14 +245,34 @@
             imageStorage
         };
     }
-    async function buildFetchedDataExport() {
-        const [cache, monthState, imageRecords] = await Promise.all([
+    async function prepareFetchedDataExport() {
+        const [cache, monthState, imageCount] = await Promise.all([
             readCache(),
             getMonthResultsState(),
-            readAllImageBlobs()
+            countImageBlobs()
         ]);
+        return {
+            filename: buildExportFilename(),
+            exportData: {
+                source: "instagram_liked_posts_extension",
+                exportedAt: new Date().toISOString(),
+                summary: {
+                    resultCount: Object.keys(monthState.resultsByKey || {}).length,
+                    postCount: Object.keys(cache.itemsByMediaId || {}).length,
+                    imageCount
+                },
+                cache,
+                fetchedResults: monthState
+            },
+            imageCount
+        };
+    }
+    async function getExportImageBatch(offset, limit) {
+        const normalizedOffset = Math.max(0, Number.isFinite(offset) ? Math.floor(offset) : 0);
+        const normalizedLimit = Math.min(25, Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 10));
+        const records = await readImageBlobPage(normalizedOffset, normalizedLimit);
         const images = [];
-        for (const record of imageRecords) {
+        for (const record of records) {
             const blob = record?.blob;
             if (!(blob instanceof Blob)) {
                 continue;
@@ -261,21 +287,11 @@
                 dataBase64: await blobToBase64(blob)
             });
         }
-        const exportData = {
-            source: "instagram_liked_posts_extension",
-            exportedAt: new Date().toISOString(),
-            summary: {
-                resultCount: Object.keys(monthState.resultsByKey || {}).length,
-                postCount: Object.keys(cache.itemsByMediaId || {}).length,
-                imageCount: images.length
-            },
-            cache,
-            fetchedResults: monthState,
-            images
-        };
         return {
-            filename: buildExportFilename(),
-            exportData
+            offset: normalizedOffset,
+            nextOffset: normalizedOffset + records.length,
+            done: records.length < normalizedLimit,
+            images
         };
     }
     function buildExportFilename() {
@@ -549,13 +565,38 @@
             request.onerror = () => reject(request.error || new Error(`Failed to read image: ${mediaId}`));
         });
     }
-    async function readAllImageBlobs() {
+    async function countImageBlobs() {
         const db = await getDb();
         return new Promise((resolve, reject) => {
             const transaction = db.transaction(IMAGE_STORE, "readonly");
             const store = transaction.objectStore(IMAGE_STORE);
-            const request = store.getAll();
-            request.onsuccess = () => resolve(Array.isArray(request.result) ? request.result : []);
+            const request = store.count();
+            request.onsuccess = () => resolve(Number(request.result || 0));
+            request.onerror = () => reject(request.error || new Error("Failed to count stored images."));
+        });
+    }
+    async function readImageBlobPage(offset, limit) {
+        const db = await getDb();
+        return new Promise((resolve, reject) => {
+            const results = [];
+            let skipped = 0;
+            const transaction = db.transaction(IMAGE_STORE, "readonly");
+            const store = transaction.objectStore(IMAGE_STORE);
+            const request = store.openCursor();
+            request.onsuccess = () => {
+                const cursor = request.result;
+                if (!cursor || results.length >= limit) {
+                    resolve(results);
+                    return;
+                }
+                if (skipped < offset) {
+                    skipped += 1;
+                    cursor.continue();
+                    return;
+                }
+                results.push(cursor.value);
+                cursor.continue();
+            };
             request.onerror = () => reject(request.error || new Error("Failed to read stored images."));
         });
     }

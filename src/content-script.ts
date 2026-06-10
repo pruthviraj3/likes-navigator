@@ -424,15 +424,53 @@ async function exportFetchedData() {
   renderOverlay();
 
   try {
-    const response = await chrome.runtime.sendMessage({ type: "EXPORT_FETCHED_DATA" }).catch((error) => ({
+    const prepared = await chrome.runtime.sendMessage({ type: "PREPARE_FETCHED_DATA_EXPORT" }).catch((error) => ({
       ok: false,
       error: String(error)
     }));
-    if (!response?.ok) {
-      throw new Error(response?.error || "Failed to export fetched data.");
+    if (!prepared?.ok) {
+      throw new Error(prepared?.error || "Failed to prepare fetched data export.");
     }
 
-    downloadJson(response.exportData, response.filename || buildExportFilename());
+    const jsonParts = [
+      "{\n",
+      `"source":${JSON.stringify(prepared.exportData?.source || "instagram_liked_posts_extension")},\n`,
+      `"exportedAt":${JSON.stringify(prepared.exportData?.exportedAt || new Date().toISOString())},\n`,
+      `"summary":${JSON.stringify(prepared.exportData?.summary || {})},\n`,
+      `"cache":${JSON.stringify(prepared.exportData?.cache || {})},\n`,
+      `"fetchedResults":${JSON.stringify(prepared.exportData?.fetchedResults || {})},\n`,
+      "\"images\":[\n"
+    ];
+
+    let offset = 0;
+    let wroteImage = false;
+    while (true) {
+      const batch = await chrome.runtime.sendMessage({
+        type: "GET_EXPORT_IMAGE_BATCH",
+        offset,
+        limit: 6
+      }).catch((error) => ({
+        ok: false,
+        error: String(error)
+      }));
+      if (!batch?.ok) {
+        throw new Error(batch?.error || "Failed to export stored images.");
+      }
+
+      for (const image of Array.isArray(batch.images) ? batch.images : []) {
+        jsonParts.push(wroteImage ? ",\n" : "");
+        jsonParts.push(JSON.stringify(image));
+        wroteImage = true;
+      }
+
+      offset = Number(batch.nextOffset || offset + 6);
+      if (batch.done) {
+        break;
+      }
+    }
+
+    jsonParts.push("\n]\n}");
+    downloadJsonParts(jsonParts, prepared.filename || buildExportFilename());
   } catch (error) {
     console.error("[insta-likes-ext] export failed", error);
     window.alert(error instanceof Error ? error.message : String(error));
@@ -442,8 +480,8 @@ async function exportFetchedData() {
   }
 }
 
-function downloadJson(data, filename) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], {
+function downloadJsonParts(parts, filename) {
+  const blob = new Blob(parts, {
     type: "application/json"
   });
   const url = URL.createObjectURL(blob);
